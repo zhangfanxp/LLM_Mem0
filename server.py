@@ -9,9 +9,9 @@ import asyncio
 import html
 import io
 import mimetypes
-import os
 import queue
 import re
+import secrets
 import sys
 import threading
 import urllib.error
@@ -20,6 +20,8 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+from config_store import DEFAULTS, SETTINGS_TOKEN, load_dotenv, public_settings, save_settings, setting
 
 
 ROOT = Path(__file__).resolve().parent
@@ -64,29 +66,7 @@ class ExternalServiceError(Exception):
         self.message = message
 
 
-def load_dotenv() -> None:
-    """Load a simple project-local .env without replacing shell variables."""
-    env_file = ROOT / ".env"
-    if not env_file.exists():
-        return
-    for raw_line in env_file.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
-        if key:
-            os.environ.setdefault(key, value)
-
-
 load_dotenv()
-
-
-def setting(key: str, default: str = "") -> str:
-    return os.environ.get(key, default).strip()
 
 
 def json_request(
@@ -426,6 +406,10 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == "/api/settings":
+            if self.settings_request_allowed():
+                self.send_json(200, {**public_settings(), "csrf_token": SETTINGS_TOKEN, "models": MODEL_OPTIONS})
+            return
         if parsed.path == "/api/config":
             self.send_json(
                 200,
@@ -439,6 +423,9 @@ class AppHandler(BaseHTTPRequestHandler):
                         "nvidia/nemotron-3.5-super-vl-120b-a12b",
                     ),
                     "models": MODEL_OPTIONS,
+                    "wake_phrase": setting("WAKE_PHRASE", DEFAULTS["WAKE_PHRASE"]) or DEFAULTS["WAKE_PHRASE"],
+                    "wake_reply_text": setting("WAKE_REPLY_TEXT", DEFAULTS["WAKE_REPLY_TEXT"]) or DEFAULTS["WAKE_REPLY_TEXT"],
+                    "tts_voice": setting("TTS_VOICE", DEFAULTS["TTS_VOICE"]),
                 },
             )
             return
@@ -464,6 +451,13 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
         try:
+            if parsed.path == "/api/settings":
+                if not self.settings_request_allowed(write=True):
+                    return
+                result = save_settings(self.read_json(), MODEL_IDS)
+                result["restart_required"] = result["values"]["PORT"] != str(self.server.server_port)
+                self.send_json(200, result)
+                return
             if parsed.path == "/api/transcribe":
                 audio = self.read_audio()
                 transcript = cloudflare_transcribe(audio)
@@ -521,6 +515,28 @@ class AppHandler(BaseHTTPRequestHandler):
             status, value = public_error(error)
             self.send_json(status, value)
 
+    def settings_request_allowed(self, write: bool = False) -> bool:
+        origin = self.headers.get("Origin")
+        origin_allowed = True
+        if origin:
+            try:
+                parsed_origin = urllib.parse.urlsplit(origin)
+                origin_allowed = (parsed_origin.scheme in {"http", "https"}
+                                  and parsed_origin.netloc.lower() == self.headers.get("Host", "").lower())
+            except ValueError:
+                origin_allowed = False
+        if self.headers.get("Sec-Fetch-Site") not in {None, "same-origin", "none"} or not origin_allowed:
+            self.send_json(403, {"error": "设置只能从当前应用页面访问。"})
+            return False
+        if write:
+            if self.headers.get_content_type() != "application/json":
+                self.send_json(415, {"error": "设置必须通过 JSON 提交。"})
+                return False
+            if not secrets.compare_digest(self.headers.get("X-Settings-Token", "").encode("utf-8"), SETTINGS_TOKEN.encode("ascii")):
+                self.send_json(403, {"error": "设置页面已失效，请关闭后重新打开。"})
+                return False
+        return True
+
     def handle_speech(self, body: dict[str, Any]) -> None:
         text = body.get("text")
         if not isinstance(text, str) or not text.strip():
@@ -532,7 +548,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def serve_static(self, request_path: str) -> None:
         relative = "index.html" if request_path in ("/", "") else request_path.lstrip("/")
-        if relative not in {"index.html", "app.js", "styles.css", "favicon.svg"}:
+        if relative not in {"index.html", "app.js", "voice.mjs", "styles.css", "favicon.svg", "vendor/pinyin-pro.mjs", "vendor/pinyin-pro.LICENSE"}:
             self.send_json(404, {"error": "找不到这个页面。"})
             return
         target = WEB_DIR / relative
@@ -547,6 +563,7 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(data)
 
@@ -847,9 +864,9 @@ class AppHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     try:
-        port = int(setting("PORT", "8000"))
+        port = int(setting("PORT", DEFAULTS["PORT"]))
     except ValueError:
-        port = 8000
+        port = int(DEFAULTS["PORT"])
     server = ThreadingHTTPServer(("127.0.0.1", port), AppHandler)
     print("Personal Memory Assistant is running at http://127.0.0.1:%d" % port)
     print("Configure NVIDIA_API_KEY, MEM0_API_KEY, and Cloudflare credentials in .env.")

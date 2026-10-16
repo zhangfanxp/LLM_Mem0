@@ -7,7 +7,7 @@
   <meta name="description" content="本机运行的 NVIDIA NIM 与 Mem0 长期记忆个人助理">
   <title>拾忆 · 个人助理</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/styles.css?v=voice-1">
+  <link rel="stylesheet" href="/styles.css?v=wake-reply-3">
 </head>
 <body>
   <div class="app-shell">
@@ -57,6 +57,7 @@
             <span class="select-chevron">⌄</span>
           </div>
           <button class="new-chat-button" id="new-chat" type="button"><span>＋</span> 新对话</button>
+          <button class="settings-button" id="open-settings" type="button" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 3-.7 2.3-2 .9-2.2-.6-2 3.4 1.5 1.8v2.4L3.1 15l2 3.4 2.2-.6 2 .9.7 2.3h4l.7-2.3 2-.9 2.2.6 2-3.4-1.5-1.8v-2.4L20.9 9l-2-3.4-2.2.6-2-.9L14 3Z"/><circle cx="12" cy="12" r="3"/></svg><span>设置</span></button>
         </div>
       </header>
 
@@ -76,6 +77,19 @@
           <div class="message-list" id="message-list" aria-live="polite"></div>
         </div>
         <div class="composer-wrap">
+          <div class="voice-toolbar" aria-label="语音输入设置">
+            <button class="wake-button" id="wake-button" type="button" aria-pressed="false" aria-describedby="wake-hint"><span class="wake-indicator" aria-hidden="true"></span><span id="wake-button-label">开启语音唤醒</span></button>
+            <label class="silence-setting" for="silence-timeout">静音结束
+              <select id="silence-timeout">
+                <option value="800">0.8 秒</option>
+                <option value="1200" selected>1.2 秒</option>
+                <option value="1800">1.8 秒</option>
+                <option value="2500">2.5 秒</option>
+              </select>
+            </label>
+          </div>
+          <p class="wake-hint" id="wake-hint">开启后说“你好迦童”，应答播报完、看到录音提示后讲话。请保持页面在前台。</p>
+          <p class="wake-heard hidden" id="wake-heard" aria-live="off"></p>
           <div class="composer" id="composer">
             <textarea id="message-input" rows="1" placeholder="说说你在想什么…" aria-label="输入消息"></textarea>
             <div class="composer-footer">
@@ -88,7 +102,7 @@
               </div>
             </div>
           </div>
-          <div class="composer-disclaimer">语音由 Cloudflare Whisper 转写；回答文字交给 NVIDIA 与 Mem0，语音播放使用 Microsoft Edge</div>
+          <div class="composer-disclaimer">唤醒识别由浏览器提供，可能联网；录音由 Cloudflare Whisper 转写，静音检测在设备本地完成</div>
         </div>
       </section>
 
@@ -123,6 +137,39 @@
       <div class="toast-region" id="toast-region" aria-live="polite"></div>
     </main>
   </div>
-    <script src="/app.js?v=voice-1" defer></script>
+  <dialog class="settings-dialog" id="settings-dialog" aria-labelledby="settings-title" aria-describedby="settings-description">
+    <form id="settings-form" autocomplete="off">
+      <div class="settings-header">
+        <div><h2 id="settings-title">设置</h2><p id="settings-description">保存到本机 .env。密钥留空会保留已有值。</p></div>
+        <button class="settings-close" id="close-settings" type="button" aria-label="关闭设置">×</button>
+      </div>
+      <div class="settings-body">
+        <fieldset><legend>语音唤醒</legend><div class="settings-grid">
+          <div class="setting-field settings-wide"><label for="setting-wake-phrase">唤醒关键词 <small>WAKE_PHRASE</small></label><input id="setting-wake-phrase" data-setting="WAKE_PHRASE" required minlength="2" maxlength="40" placeholder="你好迦童"><p>支持中文同音识别，例如“童童大王”也能匹配“同同大王”。</p></div>
+          <div class="setting-field settings-wide"><label for="setting-wake-reply">唤醒应答 <small>WAKE_REPLY_TEXT</small></label><textarea id="setting-wake-reply" data-setting="WAKE_REPLY_TEXT" rows="2" required maxlength="200" placeholder="你好，主人您有什么吩咐"></textarea><p>唤醒后先朗读这句话，播报结束再开始录音。最多 200 字。</p></div>
+        </div></fieldset>
+        <fieldset><legend>对话模型</legend><div class="settings-grid">
+          <div class="setting-field settings-wide"><label for="setting-nvidia-key">NVIDIA API Key <small>NVIDIA_API_KEY</small></label><input id="setting-nvidia-key" data-setting="NVIDIA_API_KEY" data-secret="true" type="password" autocomplete="new-password" maxlength="4096"><label class="clear-secret"><input type="checkbox" data-clear-secret="NVIDIA_API_KEY">清除已保存的密钥</label></div>
+          <div class="setting-field"><label for="setting-model">默认模型 <small>NVIDIA_DEFAULT_MODEL</small></label><select id="setting-model" data-setting="NVIDIA_DEFAULT_MODEL" required></select></div>
+          <div class="setting-field"><label for="setting-reasoning">推理强度 <small>NVIDIA_REASONING_EFFORT</small></label><select id="setting-reasoning" data-setting="NVIDIA_REASONING_EFFORT"><option value="none">关闭推理 · none</option><option value="low">较快回答 · low</option><option value="high">充分推理 · high</option></select></div>
+          <div class="setting-field settings-wide"><label for="setting-base-url">NVIDIA API 地址 <small>NVIDIA_BASE_URL</small></label><input id="setting-base-url" data-setting="NVIDIA_BASE_URL" type="url" required maxlength="4096" spellcheck="false"></div>
+        </div></fieldset>
+        <fieldset><legend>长期记忆</legend><div class="settings-grid">
+          <div class="setting-field settings-wide"><label for="setting-mem0-key">Mem0 API Key <small>MEM0_API_KEY</small></label><input id="setting-mem0-key" data-setting="MEM0_API_KEY" data-secret="true" type="password" autocomplete="new-password" maxlength="4096"><label class="clear-secret"><input type="checkbox" data-clear-secret="MEM0_API_KEY">清除已保存的密钥</label></div>
+          <div class="setting-field settings-wide"><label for="setting-user-id">记忆用户标识 <small>MEM0_USER_ID</small></label><input id="setting-user-id" data-setting="MEM0_USER_ID" required maxlength="4096"><p>更换标识后，将读取该标识对应的记忆库。</p></div>
+        </div></fieldset>
+        <fieldset><legend>语音识别与播报</legend><div class="settings-grid">
+          <div class="setting-field settings-wide"><label for="setting-tts-voice">播报音色 <small>TTS_VOICE</small></label><input id="setting-tts-voice" data-setting="TTS_VOICE" required maxlength="4096" placeholder="zh-CN-XiaoxiaoNeural"></div>
+          <div class="setting-field settings-wide"><label for="setting-cf-account">Cloudflare Account ID <small>CLOUDFLARE_ACCOUNT_ID</small></label><input id="setting-cf-account" data-setting="CLOUDFLARE_ACCOUNT_ID" maxlength="4096" spellcheck="false"></div>
+          <div class="setting-field settings-wide"><label for="setting-cf-token">Cloudflare API Token <small>CLOUDFLARE_API_TOKEN</small></label><input id="setting-cf-token" data-setting="CLOUDFLARE_API_TOKEN" data-secret="true" type="password" autocomplete="new-password" maxlength="4096"><label class="clear-secret"><input type="checkbox" data-clear-secret="CLOUDFLARE_API_TOKEN">清除已保存的密钥</label></div>
+        </div></fieldset>
+        <fieldset><legend>本机服务</legend><div class="settings-grid">
+          <div class="setting-field"><label for="setting-port">服务端口 <small>PORT</small></label><input id="setting-port" data-setting="PORT" type="number" min="1" max="65535" step="1" required><p>修改端口后，需要重启服务。</p></div>
+        </div></fieldset>
+      </div>
+      <div class="settings-footer"><p id="settings-status" role="status" aria-live="polite"></p><button class="settings-save" id="save-settings" type="submit">保存设置</button></div>
+    </form>
+  </dialog>
+  <script src="/app.js?v=wake-reply-3" type="module"></script>
 </body>
 </html>

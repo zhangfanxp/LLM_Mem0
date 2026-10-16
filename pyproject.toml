@@ -1,6 +1,6 @@
 [project]
 name = "llm-mem0"
-version = "0.1.0"
+version = "1.21"
 description = "Local single-user personal assistant with NVIDIA NIM, Mem0, Cloudflare Whisper, and Microsoft Edge TTS"
 readme = "README.md"
 requires-python = ">=3.10"

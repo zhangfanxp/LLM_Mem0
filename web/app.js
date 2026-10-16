@@ -1,3 +1,5 @@
+import { VoiceInputController } from "./voice.mjs?v=wake-reply-3";
+
 const CHAT_KEY = "shiyi-chat-v1";
 const MODEL_KEY = "shiyi-model-v1";
 const $ = (selector) => document.querySelector(selector);
@@ -7,21 +9,35 @@ const input = $("#message-input");
 const sendButton = $("#send-button");
 const microphoneButton = $("#microphone-button");
 const voiceStatus = $("#voice-status");
+const wakeButton = $("#wake-button");
+const silenceTimeout = $("#silence-timeout");
+const settingsDialog = $("#settings-dialog");
+const settingsForm = $("#settings-form");
+const settingsButton = $("#open-settings");
 const welcome = $("#welcome");
 const toastRegion = $("#toast-region");
 
 let config = null;
+let wakeReplyText = "你好，主人您有什么吩咐";
+let wakeReplyVoice = "zh-CN-XiaoxiaoNeural";
+let wakeReplyCache = null;
 let messages = loadChat();
 let memorySearchTimer = null;
 let memoryRequestId = 0;
 let memoryHasMore = false;
 let memoryPage = 1;
 let busy = false;
-let mediaRecorder = null;
-let microphoneStream = null;
-let recordingChunks = [];
-let recordingTimer = null;
+let settingsOpen = false;
+let settingsLoading = false;
+let settingsSaving = false;
+let settingsRequestId = 0;
+let settingsToken = "";
+let settingsSecrets = {};
 let voiceProcessing = false;
+let voiceMessage = "";
+let voiceMessageActive = false;
+let speechPreparing = false;
+let speechRequestId = 0;
 let activeAudio = null;
 let activeSpeechMessage = null;
 let activeStreamAudioUrl = null;
@@ -29,8 +45,85 @@ let streamAudioQueue = [];
 let streamAudioPlaying = false;
 let streamSpeechCancelled = false;
 let streamSpeechWarningShown = false;
-const speechUrls = new WeakMap();
-const MAX_RECORDING_MS = 120_000;
+let streamAudioTask = null;
+let speechUrls = new WeakMap();
+const voice = new VoiceInputController({
+  onChange: () => { updateComposerControls(); renderVoiceStatus(); },
+  onRecording: (blob) => { transcribeRecording(blob); },
+  onError: (message) => showToast(message, "error"),
+  onNotice: (message) => showToast(message, "warning"),
+  onWake: playWakeReply
+});
+
+function applyVoiceConfig(payload) {
+  voice.setWakePhrase(payload.wake_phrase || "你好迦童");
+  const text = payload.wake_reply_text || "你好，主人您有什么吩咐";
+  const voiceName = payload.tts_voice || "zh-CN-XiaoxiaoNeural";
+  if (text !== wakeReplyText || voiceName !== wakeReplyVoice) {
+    wakeReplyCache?.controller.abort();
+    wakeReplyCache = null;
+  }
+  wakeReplyText = text;
+  wakeReplyVoice = voiceName;
+  updateWakeHint();
+}
+
+function prepareWakeReplyAudio() {
+  const key = JSON.stringify([wakeReplyText, wakeReplyVoice]);
+  if (wakeReplyCache?.key === key) return wakeReplyCache.promise;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 15_000);
+  const entry = { key, controller, promise: null };
+  entry.promise = (async () => {
+    const response = await fetch("/api/speech", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: wakeReplyText }),
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error("唤醒应答语音合成失败。");
+    const data = await response.arrayBuffer();
+    if (!data.byteLength) throw new Error("唤醒应答语音为空。");
+    return data;
+  })().catch((error) => {
+    if (wakeReplyCache === entry) wakeReplyCache = null;
+    throw error;
+  }).finally(() => window.clearTimeout(timeout));
+  wakeReplyCache = entry;
+  return entry.promise;
+}
+
+async function playWakeReply({ signal, audioContext }) {
+  showView("chat");
+  const encoded = await prepareWakeReplyAudio();
+  if (signal.aborted) return;
+  // decodeAudioData may detach its input; keep the cached audio reusable.
+  const buffer = await audioContext.decodeAudioData(encoded.slice(0));
+  if (signal.aborted) return;
+  const source = audioContext.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioContext.destination);
+  await new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", abort);
+      source.onended = null;
+      source.disconnect();
+      if (error) reject(error);
+      else resolve();
+    };
+    const abort = () => {
+      try { source.stop(); } catch (_) {}
+      finish(new DOMException("唤醒应答已取消", "AbortError"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    source.onended = () => finish();
+    if (signal.aborted) { abort(); return; }
+    try { source.start(); } catch (error) { finish(error); }
+  });
+}
 
 function loadChat() {
   try {
@@ -141,7 +234,7 @@ function scrollChatToBottom() {
 
 function setBusy(value) {
   busy = value;
-  updateComposerControls();
+  syncVoiceState();
   sendButton.classList.toggle("sending", value);
   if (value) {
     const typing = document.createElement("div");
@@ -255,7 +348,7 @@ function enqueueStreamAudio(encodedAudio) {
     for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
     const url = URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" }));
     streamAudioQueue.push(url);
-    playStreamAudioQueue();
+    if (!streamAudioPlaying) streamAudioTask = playStreamAudioQueue();
   } catch (_) {
     if (!streamSpeechWarningShown) {
       streamSpeechWarningShown = true;
@@ -267,6 +360,7 @@ function enqueueStreamAudio(encodedAudio) {
 async function playStreamAudioQueue() {
   if (streamAudioPlaying || streamSpeechCancelled) return;
   streamAudioPlaying = true;
+  syncVoiceState();
   while (streamAudioQueue.length && !streamSpeechCancelled) {
     const url = streamAudioQueue.shift();
     const audio = new Audio(url);
@@ -301,19 +395,15 @@ async function playStreamAudioQueue() {
     }
   }
   streamAudioPlaying = false;
+  syncVoiceState();
 }
 
 async function sendMessage(raw, options) {
   options = options || {};
   const text = String(raw || input.value).trim();
-  if (!text || busy) return;
+  if (!text || busy || voiceProcessing || voice.capturing || settingsOpen) return;
   const priorMessages = messages.slice(-24).map((item) => ({ role: item.role, content: item.content }));
-  stopStreamAudio();
-  if (activeAudio) {
-    activeAudio.pause();
-    activeAudio = null;
-    activeSpeechMessage = null;
-  }
+  stopAudioPlayback();
   messages.push({ role: "user", content: text, time: new Date().toISOString() });
   saveChat();
   renderChat();
@@ -370,148 +460,125 @@ async function sendMessage(raw, options) {
 }
 
 function updateVoiceStatus(message, active) {
+  voiceMessage = message || "";
+  voiceMessageActive = Boolean(active);
+  renderVoiceStatus();
+}
+
+function renderVoiceStatus() {
+  let message = voiceMessage || voice.status;
+  if (!voiceMessage && voice.wakeEnabled && settingsOpen) message = "设置已打开 · 关闭后恢复唤醒";
+  else if (!voiceMessage && voice.wakeEnabled && busy) message = "正在回答 · 结束后恢复唤醒";
+  else if (!voiceMessage && voice.wakeEnabled && (speechPreparing || streamAudioPlaying || (activeAudio && !activeAudio.paused))) {
+    message = "正在播放回答 · 唤醒监听已暂停";
+  }
   voiceStatus.replaceChildren();
-  if (message) {
-    voiceStatus.textContent = message;
-  } else {
+  if (message) voiceStatus.textContent = message;
+  else {
     const mark = document.createElement("span");
     mark.className = "tiny-memory";
     mark.textContent = "✳";
     voiceStatus.append(mark, document.createTextNode(" 重要内容会自动整理进记忆"));
   }
-  voiceStatus.classList.toggle("voice-status-active", Boolean(active));
+  voiceStatus.classList.toggle("voice-status-active", voiceMessageActive || voice.capturing);
+  const heard = $("#wake-heard");
+  heard.textContent = voice.lastHeard && voice.wakeEnabled ? `刚才听到：${voice.lastHeard}` : "";
+  heard.classList.toggle("hidden", !heard.textContent);
 }
 
 function updateComposerControls() {
-  const recording = Boolean(mediaRecorder && mediaRecorder.state === "recording");
-  sendButton.disabled = busy || voiceProcessing || recording;
-  input.disabled = busy || voiceProcessing || recording;
-  microphoneButton.disabled = busy || voiceProcessing;
-  microphoneButton.classList.toggle("voice-recording", recording);
-  microphoneButton.setAttribute("aria-label", recording ? "停止录音并识别" : "开始录音");
-  microphoneButton.title = recording ? "停止录音并识别" : "开始录音";
+  sendButton.disabled = busy || voiceProcessing || voice.capturing;
+  input.disabled = busy || voiceProcessing || voice.capturing;
+  microphoneButton.disabled = busy || voiceProcessing || (voice.capturing && !voice.recording);
+  microphoneButton.classList.toggle("voice-recording", voice.recording);
+  const label = voice.recording ? "停止录音并识别" : "开始录音，静音后自动结束";
+  microphoneButton.setAttribute("aria-label", label);
+  microphoneButton.title = label;
+  silenceTimeout.disabled = voice.capturing;
+  wakeButton.setAttribute("aria-pressed", String(voice.wakeEnabled));
+  wakeButton.classList.toggle("wake-listening", voice.phase === "listening");
+  $("#wake-button-label").textContent = voice.wakeEnabled ? "关闭语音唤醒" : "开启语音唤醒";
+  // Always allow turning wake mode off, including while recording.
+  wakeButton.disabled = !voice.wakeEnabled && (!voice.canWake || busy || voiceProcessing || voice.capturing);
+  settingsButton.disabled = busy || voiceProcessing || voice.capturing;
 }
 
-function stopRecording() {
-  if (!mediaRecorder || mediaRecorder.state !== "recording") return;
-  window.clearTimeout(recordingTimer);
-  voiceProcessing = true;
-  updateVoiceStatus("正在识别语音…", true);
-  mediaRecorder.stop();
+function syncVoiceState() {
+  voice.setBlocked(settingsOpen || busy || voiceProcessing || speechPreparing || streamAudioPlaying || streamAudioQueue.length > 0 || Boolean(activeAudio && !activeAudio.paused));
   updateComposerControls();
+  renderVoiceStatus();
+}
+
+function stopAudioPlayback() {
+  speechRequestId += 1;
+  speechPreparing = false;
+  stopStreamAudio();
+  if (activeAudio) activeAudio.pause();
+  activeAudio = null;
+  activeSpeechMessage = null;
 }
 
 async function transcribeRecording(blob) {
+  voiceProcessing = true;
+  updateVoiceStatus("正在识别语音…", true);
+  syncVoiceState();
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 60_000);
   try {
     const response = await fetch("/api/transcribe", {
       method: "POST",
       headers: { "Content-Type": blob.type || "application/octet-stream" },
-      body: blob
+      body: blob,
+      signal: controller.signal
     });
     let payload = {};
     try { payload = await response.json(); } catch (_) { payload = {}; }
     if (!response.ok) throw new Error(payload.error || "语音识别失败，请稍后重试。");
     const transcript = String(payload.text || "").trim();
     if (!transcript) throw new Error("没有识别到语音内容，请再试一次。");
+    window.clearTimeout(timeout);
     voiceProcessing = false;
     input.value = transcript;
     resizeInput();
-    updateVoiceStatus("识别完成，正在发送…", true);
-    updateComposerControls();
+    updateVoiceStatus("", false);
+    // sendMessage sets busy synchronously so wake cannot restart between steps.
     await sendMessage(transcript, { speakResponse: true, focus: false });
-    updateVoiceStatus("", false);
   } catch (error) {
+    showToast(error.name === "AbortError" ? "语音识别超时，请检查网络后重试。" : error.message, "error");
+  } finally {
+    window.clearTimeout(timeout);
     voiceProcessing = false;
-    updateComposerControls();
     updateVoiceStatus("", false);
-    showToast(error.message, "error");
+    syncVoiceState();
   }
 }
 
 async function toggleRecording() {
-  if (mediaRecorder && mediaRecorder.state === "recording") {
-    stopRecording();
-    return;
-  }
-  if (busy || voiceProcessing) return;
-  if (!window.isSecureContext) {
-    showToast("浏览器只允许在 HTTPS 或 localhost 页面使用麦克风。", "error");
-    return;
-  }
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
-    showToast("当前浏览器不支持网页录音，请更新浏览器后重试。", "error");
-    return;
-  }
-
-  voiceProcessing = true;
-  updateVoiceStatus("正在申请麦克风权限…", true);
-  updateComposerControls();
-  try {
-    microphoneStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-    });
-    const mimeTypes = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
-    const mimeType = mimeTypes.find((type) => MediaRecorder.isTypeSupported(type));
-    mediaRecorder = mimeType ? new MediaRecorder(microphoneStream, { mimeType: mimeType }) : new MediaRecorder(microphoneStream);
-    recordingChunks = [];
-    const recorder = mediaRecorder;
-    recorder.addEventListener("dataavailable", (event) => {
-      if (event.data && event.data.size) recordingChunks.push(event.data);
-    });
-    recorder.addEventListener("stop", () => {
-      window.clearTimeout(recordingTimer);
-      if (microphoneStream) microphoneStream.getTracks().forEach((track) => track.stop());
-      microphoneStream = null;
-      mediaRecorder = null;
-      const blob = new Blob(recordingChunks, { type: recorder.mimeType || "audio/webm" });
-      recordingChunks = [];
-      if (!blob.size) {
-        voiceProcessing = false;
-        updateComposerControls();
-        updateVoiceStatus("", false);
-        showToast("没有录到声音，请重新录制。", "error");
-        return;
-      }
-      transcribeRecording(blob);
-    });
-    recorder.start();
-    voiceProcessing = false;
-    updateVoiceStatus("正在录音 · 再点麦克风结束", true);
-    updateComposerControls();
-    recordingTimer = window.setTimeout(() => {
-      showToast("录音已达到 2 分钟上限，正在识别。", "warning");
-      stopRecording();
-    }, MAX_RECORDING_MS);
-  } catch (error) {
-    if (microphoneStream) microphoneStream.getTracks().forEach((track) => track.stop());
-    microphoneStream = null;
-    mediaRecorder = null;
-    voiceProcessing = false;
-    updateComposerControls();
-    updateVoiceStatus("", false);
-    const message = error && error.name === "NotAllowedError"
-      ? "麦克风权限未开启，请在浏览器设置中允许访问麦克风。"
-      : "无法启动麦克风，请检查设备连接或浏览器权限。";
-    showToast(message, "error");
-  }
+  if (voice.recording) { voice.stopRecording(); return; }
+  if (busy || voiceProcessing || voice.capturing || settingsOpen) return;
+  stopAudioPlayback();
+  syncVoiceState();
+  if (streamAudioTask) await streamAudioTask;
+  await voice.startRecording();
 }
 
 async function playSpeech(message, button, automatic) {
-  if (!message || !message.content) return;
-  stopStreamAudio();
-  if (activeAudio && activeSpeechMessage === message) {
-    if (!activeAudio.paused) {
-      activeAudio.pause();
-      return;
-    }
-    try { await activeAudio.play(); return; } catch (_) {}
+  if (!message || !message.content || voice.capturing || voiceProcessing || settingsOpen) return;
+  if (activeAudio && activeSpeechMessage === message && !activeAudio.paused) {
+    activeAudio.pause();
+    return;
   }
-  if (activeAudio) activeAudio.pause();
+  stopAudioPlayback();
+  const requestId = ++speechRequestId;
+  speechPreparing = true;
+  syncVoiceState();
   if (button) {
     button.disabled = true;
     button.innerHTML = '<span>◌</span> 正在合成…';
   }
   try {
+    await voice.stopWake();
+    if (streamAudioTask) await streamAudioTask;
     let url = speechUrls.get(message);
     if (!url) {
       const response = await fetch("/api/speech", {
@@ -527,23 +594,29 @@ async function playSpeech(message, button, automatic) {
       url = URL.createObjectURL(await response.blob());
       speechUrls.set(message, url);
     }
+    if (requestId !== speechRequestId) return;
     const audio = new Audio(url);
     activeAudio = audio;
     activeSpeechMessage = message;
-    audio.addEventListener("ended", () => {
+    const finish = () => {
       if (activeAudio === audio) {
         activeAudio = null;
         activeSpeechMessage = null;
+        syncVoiceState();
       }
-    }, { once: true });
+    };
+    for (const event of ["ended", "error", "pause"]) audio.addEventListener(event, finish, { once: true });
     await audio.play();
   } catch (error) {
-    if (automatic) {
-      showToast("回答文字已显示，但浏览器没有自动播放语音；点回答下方“朗读回答”即可播放。", "warning");
-    } else {
-      showToast(error.message, "error");
-    }
+    if (requestId !== speechRequestId) return;
+    activeAudio = null;
+    activeSpeechMessage = null;
+    showToast(automatic ? "回答文字已显示，但浏览器没有自动播放语音；点回答下方“朗读回答”即可播放。" : error.message, "error");
   } finally {
+    if (requestId === speechRequestId) {
+      speechPreparing = false;
+      syncVoiceState();
+    }
     if (button) {
       button.disabled = false;
       button.innerHTML = '<span>◖))</span> 朗读回答';
@@ -592,6 +665,7 @@ function renderModelOptions() {
 async function loadConfig() {
   try {
     config = await api("/api/config");
+    applyVoiceConfig(config);
     renderModelOptions();
     $("#nvidia-dot").classList.toggle("connected", config.nvidia_ready);
     $("#mem0-dot").classList.toggle("connected", config.mem0_ready);
@@ -606,13 +680,122 @@ async function loadConfig() {
       if (!config.nvidia_ready) missing.push("NVIDIA_API_KEY");
       if (!config.mem0_ready) missing.push("MEM0_API_KEY");
       if (!config.cloudflare_ready) missing.push("CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN（语音识别）");
-      hint.textContent = "请在 .env 填写 " + missing.join(" 和 ");
+      hint.textContent = "请在设置中填写 " + missing.join(" 和 ");
       hint.classList.remove("service-ready");
     }
     $("#cloudflare-dot").classList.toggle("connected", config.cloudflare_ready);
     $("#memory-summary").textContent = config.mem0_ready ? "记忆由 Mem0 云端管理" : "配置 Mem0 Key 后即可连接";
   } catch (error) {
     $("#service-hint").textContent = error.message;
+  }
+}
+
+function updateWakeHint() {
+  $("#wake-hint").textContent = !voice.canWake
+    ? (voice.supported ? "当前浏览器不支持语音唤醒，仍可点击麦克风录音，静音后自动结束。" : voice.supportError())
+    : `开启后说“${voice.wakePhrase}”，应答播报完、看到录音提示后讲话。请保持页面在前台。`;
+}
+
+function settingsStatus(message, error = false) {
+  const status = $("#settings-status");
+  status.textContent = message;
+  status.classList.toggle("settings-error", error);
+}
+
+function updateSettingsControls() {
+  const pending = settingsLoading || settingsSaving;
+  document.querySelectorAll("[data-setting]").forEach((field) => {
+    const clear = field.dataset.secret && document.querySelector(`[data-clear-secret="${field.dataset.setting}"]`);
+    field.disabled = pending || Boolean(clear && clear.checked);
+  });
+  document.querySelectorAll("[data-clear-secret]").forEach((field) => {
+    field.disabled = pending || !settingsSecrets[field.dataset.clearSecret];
+  });
+  $("#save-settings").disabled = pending || !settingsToken;
+  $("#save-settings").textContent = settingsSaving ? "正在保存…" : "保存设置";
+  $("#close-settings").disabled = settingsSaving;
+  settingsForm.setAttribute("aria-busy", String(pending));
+}
+
+function fillSettings(payload) {
+  settingsSecrets = payload.secrets || {};
+  if (payload.models) {
+    const modelSelect = $("#setting-model");
+    modelSelect.replaceChildren();
+    payload.models.forEach((model) => {
+      const option = document.createElement("option");
+      option.value = model.id;
+      option.textContent = model.name;
+      modelSelect.appendChild(option);
+    });
+  }
+  document.querySelectorAll("[data-setting]").forEach((field) => {
+    const key = field.dataset.setting;
+    field.value = field.dataset.secret ? "" : String(payload.values[key] ?? "");
+    if (field.dataset.secret) field.placeholder = settingsSecrets[key] ? "已配置，留空保留" : "尚未配置，请填写";
+  });
+  document.querySelectorAll("[data-clear-secret]").forEach((field) => { field.checked = false; });
+}
+
+async function openSettings() {
+  if (busy || voiceProcessing || voice.capturing || settingsOpen) return;
+  settingsOpen = true;
+  settingsToken = "";
+  settingsLoading = true;
+  const requestId = ++settingsRequestId;
+  stopAudioPlayback();
+  syncVoiceState();
+  settingsDialog.showModal();
+  settingsStatus("正在读取配置…");
+  updateSettingsControls();
+  try {
+    const payload = await api("/api/settings");
+    if (requestId !== settingsRequestId) return;
+    settingsToken = payload.csrf_token;
+    fillSettings(payload);
+    settingsStatus("保存后生效；修改端口需要重启服务。");
+  } catch (error) {
+    if (requestId === settingsRequestId) settingsStatus(error.message, true);
+  } finally {
+    if (requestId === settingsRequestId) {
+      settingsLoading = false;
+      updateSettingsControls();
+    }
+  }
+}
+
+async function saveSettings(event) {
+  event.preventDefault();
+  if (settingsLoading || settingsSaving || !settingsToken) return;
+  const values = {};
+  document.querySelectorAll("[data-setting]").forEach((field) => {
+    if (!field.dataset.secret || field.value.trim()) values[field.dataset.setting] = field.value;
+  });
+  const clearSecrets = Array.from(document.querySelectorAll("[data-clear-secret]")).filter((field) => field.checked).map((field) => field.dataset.clearSecret);
+  settingsSaving = true;
+  settingsStatus("正在保存配置…");
+  updateSettingsControls();
+  try {
+    const result = await api("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Settings-Token": settingsToken },
+      body: JSON.stringify({ values, clear_secrets: clearSecrets })
+    });
+    // Refresh wake immediately even if the subsequent status request fails.
+    applyVoiceConfig({ wake_phrase: result.values.WAKE_PHRASE, wake_reply_text: result.values.WAKE_REPLY_TEXT, tts_voice: result.values.TTS_VOICE });
+    speechUrls = new WeakMap();
+    localStorage.setItem(MODEL_KEY, result.values.NVIDIA_DEFAULT_MODEL);
+    fillSettings(result);
+    await loadConfig();
+    if (!$("#memories-view").classList.contains("hidden")) loadMemories();
+    settingsStatus(result.restart_required
+      ? `已保存到 .env。请重启服务，并访问新端口 ${result.values.PORT}。`
+      : "已保存到 .env，新配置已生效。");
+  } catch (error) {
+    settingsStatus(error.message, true);
+  } finally {
+    settingsSaving = false;
+    updateSettingsControls();
   }
 }
 
@@ -784,6 +967,42 @@ function resizeInput() {
 
 $("#send-button").addEventListener("click", () => sendMessage());
 microphoneButton.addEventListener("click", toggleRecording);
+settingsButton.addEventListener("click", openSettings);
+settingsForm.addEventListener("submit", saveSettings);
+$("#close-settings").addEventListener("click", () => { if (!settingsSaving) settingsDialog.close(); });
+settingsDialog.addEventListener("cancel", (event) => { if (settingsSaving) event.preventDefault(); });
+settingsDialog.addEventListener("close", () => {
+  settingsOpen = false;
+  settingsRequestId += 1;
+  settingsToken = "";
+  document.querySelectorAll('[data-secret="true"]').forEach((field) => { field.value = ""; });
+  syncVoiceState();
+});
+document.querySelectorAll("[data-clear-secret]").forEach((checkbox) => {
+  checkbox.addEventListener("change", () => {
+    if (checkbox.checked) document.querySelector(`[data-setting="${checkbox.dataset.clearSecret}"]`).value = "";
+    updateSettingsControls();
+  });
+});
+document.querySelectorAll("[data-setting]").forEach((field) => {
+  field.addEventListener("input", () => settingsStatus("有未保存的修改。"));
+  field.addEventListener("change", () => settingsStatus("有未保存的修改。"));
+});
+wakeButton.addEventListener("click", () => {
+  if (voice.wakeEnabled) voice.disableWake();
+  else {
+    voice.enableWake();
+    // Prepare the fixed reply while waiting, to avoid synthesis delay on wake.
+    prepareWakeReplyAudio().catch(() => {});
+  }
+});
+silenceTimeout.addEventListener("change", () => {
+  voice.silenceMs = Number(silenceTimeout.value);
+  renderVoiceStatus();
+});
+document.addEventListener("visibilitychange", () => voice.setHidden(document.hidden));
+window.addEventListener("pagehide", () => voice.destroy());
+window.addEventListener("pageshow", () => voice.setHidden(document.hidden));
 input.addEventListener("input", resizeInput);
 input.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
@@ -820,5 +1039,8 @@ $("#memory-search").addEventListener("keydown", (event) => {
   }
 });
 
+updateWakeHint();
+voice.setHidden(document.hidden);
+syncVoiceState();
 renderChat();
 loadConfig();

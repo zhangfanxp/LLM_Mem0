@@ -377,7 +377,7 @@ wheels = [
 
 [[package]]
 name = "llm-mem0"
-version = "0.1.0"
+version = "1.21"
 source = { virtual = "." }
 dependencies = [
     { name = "edge-tts" },
