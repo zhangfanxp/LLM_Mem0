@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f5f1">
+  <meta name="description" content="本机运行的 NVIDIA NIM 与 Mem0 长期记忆个人助理">
+  <title>拾忆 · 个人助理</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css?v=voice-1">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="拾忆首页">
+        <span class="brand-mark"><span></span><span></span><span></span></span>
+        <span class="brand-copy"><strong>拾忆</strong><small>PERSONAL AI</small></span>
+      </a>
+
+      <div class="sidebar-label">工作区</div>
+      <nav class="nav-list" aria-label="主导航">
+        <button class="nav-item active" data-view="chat" type="button">
+          <span class="nav-icon">◌</span><span>对话</span><span class="nav-arrow">↗</span>
+        </button>
+        <button class="nav-item" data-view="memories" type="button">
+          <span class="nav-icon memory-icon">✳</span><span>记忆库</span><span class="nav-count" id="memory-count">—</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-card">
+        <div class="sidebar-card-icon">✦</div>
+        <div>
+          <strong>越聊越懂你</strong>
+          <p>重要的偏好、目标和项目，会沉淀为长期记忆。</p>
+        </div>
+      </div>
+
+      <div class="sidebar-bottom">
+        <div class="privacy-note"><span class="privacy-dot"></span><span>本机运行 · 密钥保存在本机后端</span></div>
+        <div class="service-row">
+          <span class="service-dot" id="nvidia-dot"></span><span>NVIDIA</span>
+          <span class="service-dot mem0-dot" id="mem0-dot"></span><span>Mem0</span>
+          <span class="service-dot cloudflare-dot" id="cloudflare-dot"></span><span>语音</span>
+          <button class="icon-button refresh-config" id="refresh-config" title="刷新连接状态" aria-label="刷新连接状态">↻</button>
+        </div>
+        <div class="service-hint" id="service-hint">正在检查本机配置…</div>
+      </div>
+    </aside>
+
+    <main class="main-panel">
+      <header class="topbar">
+        <div class="breadcrumbs"><span class="crumb-muted">拾忆</span><span class="crumb-sep">/</span><span id="current-section">对话</span></div>
+        <div class="topbar-actions">
+          <div class="model-picker">
+            <span class="model-spark">✦</span>
+            <select id="model-select" aria-label="选择 NVIDIA 模型"></select>
+            <span class="select-chevron">⌄</span>
+          </div>
+          <button class="new-chat-button" id="new-chat" type="button"><span>＋</span> 新对话</button>
+        </div>
+      </header>
+
+      <section class="view chat-view" id="chat-view">
+        <div class="chat-scroll" id="chat-scroll">
+          <div class="welcome" id="welcome">
+            <div class="welcome-orbit"><span></span><i></i><b></b></div>
+            <div class="eyebrow"><span class="eyebrow-line"></span> YOUR PERSONAL ASSISTANT <span class="eyebrow-line"></span></div>
+            <h1>你好，我会记住<br><em>对你重要的事。</em></h1>
+            <p class="welcome-copy">从今天开始，把偏好、目标和正在做的项目告诉我。<br>下次聊到相关话题，我会带着这些背景继续帮你。</p>
+            <div class="suggestion-grid">
+              <button class="suggestion" data-prompt="帮我制定一个每周复盘计划，我希望周日晚花 20 分钟完成。" type="button"><span class="suggestion-icon lavender">◷</span><span><strong>规划与复盘</strong><small>把长期目标拆成小步骤</small></span><span class="suggestion-arrow">↗</span></button>
+              <button class="suggestion" data-prompt="我想告诉你一些关于我的长期偏好，请帮我整理成简短的个人档案。" type="button"><span class="suggestion-icon peach">✳</span><span><strong>了解我的偏好</strong><small>建立更贴合你的个人背景</small></span><span class="suggestion-arrow">↗</span></button>
+              <button class="suggestion" data-prompt="我最近在做一个项目，帮我梳理下一步应该做什么。" type="button"><span class="suggestion-icon mint">↗</span><span><strong>推进一个项目</strong><small>整理当前进度与下一步</small></span><span class="suggestion-arrow">↗</span></button>
+            </div>
+          </div>
+          <div class="message-list" id="message-list" aria-live="polite"></div>
+        </div>
+        <div class="composer-wrap">
+          <div class="composer" id="composer">
+            <textarea id="message-input" rows="1" placeholder="说说你在想什么…" aria-label="输入消息"></textarea>
+            <div class="composer-footer">
+              <div class="composer-note" id="voice-status" role="status" aria-live="polite"><span class="tiny-memory">✳</span> 重要内容会自动整理进记忆</div>
+              <div class="composer-actions">
+                <button class="microphone-button" id="microphone-button" type="button" aria-label="开始录音" title="开始录音">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14.5a3.5 3.5 0 0 0 3.5-3.5V6a3.5 3.5 0 1 0-7 0v5a3.5 3.5 0 0 0 3.5 3.5Z"/><path d="M5.5 10.5v.5a6.5 6.5 0 0 0 13 0v-.5M12 17.5V21m-3 0h6"/></svg>
+                </button>
+                <button class="send-button" id="send-button" type="button" aria-label="发送消息"><span>发送</span><b>↗</b></button>
+              </div>
+            </div>
+          </div>
+          <div class="composer-disclaimer">语音由 Cloudflare Whisper 转写；回答文字交给 NVIDIA 与 Mem0，语音播放使用 Microsoft Edge</div>
+        </div>
+      </section>
+
+      <section class="view memories-view hidden" id="memories-view">
+        <div class="memory-heading">
+          <div>
+            <div class="eyebrow memory-eyebrow"><span class="eyebrow-line"></span> YOUR PERSONAL CONTEXT</div>
+            <h1>你的记忆<span class="heading-period">.</span></h1>
+            <p>由对话中重要的信息整理而来。你可以搜索、删除，或清空全部记忆。</p>
+          </div>
+          <button class="clear-all-button" id="clear-all" type="button"><span>⌫</span> 清空全部记忆</button>
+        </div>
+        <div class="memory-toolbar">
+          <label class="memory-search">
+            <span class="search-icon">⌕</span>
+            <input id="memory-search" type="search" placeholder="搜索偏好、目标或项目…" autocomplete="off">
+            <kbd>↵</kbd>
+          </label>
+          <button class="toolbar-button" id="refresh-memories" type="button"><span>↻</span> 刷新</button>
+        </div>
+        <div class="memory-meta"><span id="memory-summary">正在加载记忆…</span><span class="memory-sort">按相关度 / 最近更新</span></div>
+        <div class="memory-list" id="memory-list"></div>
+        <button class="load-more-button hidden" id="load-more-memories" type="button">加载更多记忆 <span>↓</span></button>
+        <div class="memory-empty hidden" id="memory-empty">
+          <div class="empty-memory-mark">✳</div>
+          <h2 id="memory-empty-title">这里还很安静</h2>
+          <p id="memory-empty-copy">开始一段对话，告诉我你的偏好、长期目标或正在推进的项目。</p>
+          <button class="text-link-button" id="go-chat" type="button">去聊一聊 <span>↗</span></button>
+        </div>
+      </section>
+
+      <div class="toast-region" id="toast-region" aria-live="polite"></div>
+    </main>
+  </div>
+    <script src="/app.js?v=voice-1" defer></script>
+</body>
+</html>
