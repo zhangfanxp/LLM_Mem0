@@ -23,7 +23,7 @@
 1. 克隆项目并进入项目目录。
 
    ```sh
-   git clone <GitHub 仓库地址>
+   git clone https://github.com/zhangfanxp/LLM_Mem0.git
    cd LLM_Mem0
    ```
 
