@@ -1,0 +1,2 @@
+# Microsoft Edge online neural text-to-speech client.
+edge-tts>=7.3.1,<8
